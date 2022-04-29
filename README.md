@@ -1,94 +1,69 @@
+# Speeding Up React Builds Using Module Federation
 
+WebPack module federation can be used for developing independently deployable microfrontends and for speeding up the
+build commands. This repo demonstrates the latter.
 
-# ReactModuleFederation
+This repo contains an application built out of 4 libraries: `about-main`, `cart-main`, `shop-main`
+and `shared-components`. What it illustrates is a system built by 3 teams: one working on `about` (we have a single lib
+in the repo, but they could have hundreds of libs), one working on `cart`, and one working on `shop`.
 
-This project was generated using [Nx](https://nx.dev).
+Normally all the four libraries would be included into the same application and bundled as part of a single WebPack
+build. This means:
 
-<p style="text-align: center;"><img src="https://raw.githubusercontent.com/nrwl/nx/master/images/nx-logo.png" width="450"></p>
+* All the libraries have to be compiled and bundled together, on one machine, from scratch. Nothing can be reused across
+  CI runs, and nothing can be split across multiple machines. This means that the build time will increase as the
+  application increases and can easily reach 20-30m.
+* All the libraries have to be compiled and served when running the serve command locally. This means that the serve
+  command will keep getting slower as the application gets bigger and can easily reach 5-10m.
 
-🔎 **Smart, Fast and Extensible Build System**
+Module federation can solve both the problems.
 
-## Adding capabilities to your workspace
+To show how, we split the application into 3 remotes: `about`, `cart`, and `shop`, and the `host` project. The `host`
+project has an implicit dependency on each remote. The repo also makes the `shared-components` library buildable.
 
-Nx supports many plugins which add capabilities for developing different types of applications and different tools.
+![Project graph](./readme-assets/graph.png)
 
-These capabilities include generating applications, libraries, etc as well as the devtools to test, and build projects as well.
+## Serving Locally
 
-Below are our core plugins:
+If you run `nx serve host`, the executor is going to build all the remotes first. If the remotes are available in the
+cache (local or remote), the executor is going to restore them from the cache. All the remotes in the case are loaded and are
+available in the application, but they are static and cannot be changed. This is great for running e2e tests in CI
+but not useful for local development.
 
-- [React](https://reactjs.org)
-  - `npm install --save-dev @nrwl/react`
-- Web (no framework frontends)
-  - `npm install --save-dev @nrwl/web`
-- [Angular](https://angular.io)
-  - `npm install --save-dev @nrwl/angular`
-- [Nest](https://nestjs.com)
-  - `npm install --save-dev @nrwl/nest`
-- [Express](https://expressjs.com)
-  - `npm install --save-dev @nrwl/express`
-- [Node](https://nodejs.org)
-  - `npm install --save-dev @nrwl/node`
+If you run `nx serve host --devRemotes=shop,cart`, the executor is going to build (or fetch from cache) `about` but
+is going to start two dev servers, one for `shop` and another one for `cart`. The `about` remote is static, while `shop` and `cart` will watch
+for file changes.
 
-There are also many [community plugins](https://nx.dev/community) you could add.
+In a large enough system (with say 10-20 remotes), you will often only work on 1 of them, but you still need the rest of
+them for the system to work. For instance, the remote you are working on might be only accessible via other remotes.
+Because you will only run your remote in the dev mode, and other remotes will be retrieved from cache, you will be able
+to run the serve command 10-20 times faster and also see the app reflect you file changes 10-20 times faster.
 
-## Generate an application
+This gives you a good developer experience: the whole app is available, but only the part you are working on is
+served and watched. The rest is "served" from cache, so is basically free (both CPU and RAM wise). So your serve command now can take a minute instead of 10 minutes and only require 4GB of RAM instead of 16.
 
-Run `nx g @nrwl/react:app my-app` to generate an application.
+Note, for this to work well in practice, you should get cache hits for other remotes most of the time (rebuilding every remote separately is slower than building everything together), which means that you should have some distributed caching set up.
 
-> You can use any of the plugins above to generate applications as well.
+## Building in CI
 
-When using Nx, you can create multiple applications and libraries in the same workspace.
+Using this approach improves the CI performance for two reasons:
 
-## Generate a library
+* Most PRs will only rebuild a few remotes, not all of them, and the rest will be retrieved from cache.
+* Every remote can be built on a separate machine, in parallel. So even PRs that change most/all remotes will get
+  significantly faster.
 
-Run `nx g @nrwl/react:lib my-lib` to generate a library.
+This repo enables Nx Cloud's distributed tasks execution. This is what is going to happen if you say change every single lib in the repo.
 
-> You can also use any of the plugins above to generate libraries as well.
+One of the agents will start building `shared-components`. While the components are being built, no remotes can be built cause they consume `shared-components` from its dist folder. So other agents will start running unit tests and lint checks. When `shared-components` is built, one agent will start building the about remote, another one will start on cart, etc. When all the remotes are build, some agent is going to build the host, which then can be deployed or used for e2e tests. Note all of this happens transparently without your having to configure anything.
 
-Libraries are shareable across libraries and applications. They can be imported from `@react-module-federation/mylib`.
+As a result, the worst case scenario build time is: `buildOf(shared-components) + buildOf(slowest remote) + buildOf(host)` which in practice ends up being significantly faster than building the whole system (often 3-4 times faster). The average build time (where components haven't changed) gets even faster: `buildOf(average remote) + buildOf(host)`.
 
-## Development server
+## E2E tests
 
-Run `nx serve my-app` for a dev server. Navigate to http://localhost:4200/. The app will automatically reload if you change any of the source files.
+As you can see in the project graph above, there are four e2e test projects in the repo: one for each remote and one for the host. Having a suite per remote allows us to distribute e2e tests across machines to make them faster and to only run the suites that could be affected by a PR.
 
-## Code scaffolding
+Because of Nx Cloud's caching ever e2e test suite isn't going to rebuild the system from scratch. It instead will get it from cache.
 
-Run `nx g @nrwl/react:component my-component --project=my-app` to generate a new component.
+## Read More
 
-## Build
-
-Run `nx build my-app` to build the project. The build artifacts will be stored in the `dist/` directory. Use the `--prod` flag for a production build.
-
-## Running unit tests
-
-Run `nx test my-app` to execute the unit tests via [Jest](https://jestjs.io).
-
-Run `nx affected:test` to execute the unit tests affected by a change.
-
-## Running end-to-end tests
-
-Run `nx e2e my-app` to execute the end-to-end tests via [Cypress](https://www.cypress.io).
-
-Run `nx affected:e2e` to execute the end-to-end tests affected by a change.
-
-## Understand your workspace
-
-Run `nx graph` to see a diagram of the dependencies of your projects.
-
-## Further help
-
-Visit the [Nx Documentation](https://nx.dev) to learn more.
-
-
-
-## ☁ Nx Cloud
-
-### Distributed Computation Caching & Distributed Task Execution
-
-<p style="text-align: center;"><img src="https://raw.githubusercontent.com/nrwl/nx/master/images/nx-cloud-card.png"></p>
-
-Nx Cloud pairs with Nx in order to enable you to build and test code more rapidly, by up to 10 times. Even teams that are new to Nx can connect to Nx Cloud and start saving time instantly.
-
-Teams using Nx gain the advantage of building full-stack applications with their preferred framework alongside Nx’s advanced code generation and project dependency graph, plus a unified experience for both frontend and backend developers.
-
-Visit [Nx Cloud](https://nx.app/) to learn more.
+* [Read this guide about module federation and faster builds](https://nx.dev/module-federation/faster-builds)
